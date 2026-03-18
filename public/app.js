@@ -510,6 +510,7 @@ function renderWheel(state) {
   const wf = wheel.wheelFinal;
   const notice = wheel.notice;
   const spin = lastSpin();
+  const suppressResult = wheelAnim.spinning || (spin?.nonce && spin.nonce !== wheelAnim.lastNonce);
 
   function wheelEntries() {
     if (phase === "wheel1" && w1) {
@@ -540,6 +541,7 @@ function renderWheel(state) {
   }
 
   const wheelInfo = (() => {
+    if (suppressResult) return '<div class="wheelState">Spinning\u2026</div>';
     if (phase === "wheel1" && w1) {
       return `
         <div class="wheelState">Remaining: ${w1.remaining.map((cid) => displayName(players, cid)).join(" · ") || "—"}</div>
@@ -587,7 +589,7 @@ function renderWheel(state) {
     `
     : "";
 
-  const modalHtml = notice && !wheelAnim.spinning
+  const modalHtml = notice && !suppressResult
     ? `
       <div class="modalOverlay" id="wheelModalOverlay">
         <div class="modal">
@@ -620,7 +622,7 @@ function renderWheel(state) {
         <div>
           <div class="wheelRow">
             <button class="btn primary" id="spinBtn" ${
-              phase === "done" || wheelAnim.spinning || Boolean(notice) ? "disabled" : ""
+              phase === "done" || wheelAnim.spinning || Boolean(notice) || suppressResult ? "disabled" : ""
             }>${spinLabel}</button>
             <div class="wheelState muted">Anyone can spin in the MVP.</div>
           </div>
@@ -664,7 +666,11 @@ function renderWheel(state) {
         return;
       }
       if ((phase === "wheelFinal" || phase === "done") && spin.entriesItemIds?.length) {
-        const byId = new Map(entries.map((e) => [e.id, e]));
+        const allWfItems = [...(wf?.remaining || []), ...(wf?.eliminated || [])];
+        const byId = new Map(allWfItems.map((it) => {
+          const ownerP = playerById(players, it.ownerClientId);
+          return [it.id, { id: it.id, label: it.label, color: ownerP?.color || "#ffffff", sub: ownerP ? ownerP.name : "—" }];
+        }));
         const snap = spin.entriesItemIds.map((id) => byId.get(id)).filter(Boolean);
         animateWheelTo(canvas, snap, spin.startAngle ?? 0, spin.endAngle ?? 0, spin.durationMs ?? 1700).then(() => {
           wheelAnim.angle = (wf?.visualAngle ?? wheelAnim.angle);
