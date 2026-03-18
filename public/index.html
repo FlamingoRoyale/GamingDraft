@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bracket Game</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <div class="logo">BG</div>
+          <div>
+            <div class="title">Bracket Game</div>
+            <div class="subtitle">Draft · Brackets · Wheels</div>
+          </div>
+        </div>
+        <div class="room-pill" id="roomPill" hidden>
+          <span class="muted">Room</span>
+          <span class="code" id="roomCodeText">—</span>
+          <button class="btn small" id="copyRoomBtn" title="Copy room code">Copy</button>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card" id="connectCard">
+          <h2>Join or create a room</h2>
+          <div class="row">
+            <label class="label">Your name</label>
+            <input id="nameInput" class="input" placeholder="e.g. Marcel" maxlength="24" />
+          </div>
+          <div class="row">
+            <label class="label">Room code</label>
+            <input id="roomInput" class="input mono" placeholder="ABC123" maxlength="12" />
+          </div>
+          <div class="actions">
+            <button id="createBtn" class="btn primary">Create room</button>
+            <button id="joinBtn" class="btn">Join room</button>
+          </div>
+          <div class="hint">
+            Tip: open this page in 3 browsers/devices and have each person join the same room code.
+          </div>
+          <div class="error" id="connectError" hidden></div>
+        </section>
+
+        <section class="card" id="statusCard" hidden>
+          <div class="statusTop">
+            <div>
+              <div class="kicker">You are</div>
+              <div class="whoami" id="whoami">—</div>
+            </div>
+            <div class="phase">
+              <div class="kicker">Phase</div>
+              <div class="phaseName" id="phaseName">—</div>
+            </div>
+          </div>
+
+          <div class="players" id="players"></div>
+
+          <div class="statusActions">
+            <button class="btn danger" id="resetBtn" title="Reset game flow (keeps seats)">Reset</button>
+          </div>
+        </section>
+
+        <section class="card span2" id="gameCard" hidden>
+          <div id="gameContent"></div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="muted">
+          MVP room state is in-memory. Refreshing is supported, server restart wipes rooms.
+        </div>
+      </footer>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module" src="/app.js?v=10"></script>
+  </body>
+</html>
+
