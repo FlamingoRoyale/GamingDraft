@@ -60,10 +60,18 @@ function normalizeAngle(a) {
 }
 
 function angleForEntryIndex(n, idx) {
-  // Pointer is at top; rotate wheel so chosen segment center aligns to -PI/2.
   const step = (Math.PI * 2) / Math.max(1, n);
-  const mid = (idx + 0.5) * step;
+  const jitter = (Math.random() - 0.5) * step * 0.7;
+  const mid = (idx + 0.5) * step + jitter;
   return -Math.PI / 2 - mid;
+}
+
+function randomExtraTurns() {
+  return 4 + Math.floor(Math.random() * 5);
+}
+
+function randomDuration() {
+  return 1500 + Math.floor(Math.random() * 800);
 }
 
 function rangeForSeat(seat) {
@@ -267,9 +275,8 @@ function spinModeWheel(room) {
   const landed = w.remaining[idx];
   const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
   const target = angleForEntryIndex(w.remaining.length, idx);
-  const extraTurns = 5;
-  const endAngle = target + extraTurns * Math.PI * 2;
-  const durationMs = 1700;
+  const endAngle = target + randomExtraTurns() * Math.PI * 2;
+  const durationMs = randomDuration();
 
   w.remaining.splice(idx, 1);
   w.eliminated.push(landed);
@@ -338,9 +345,8 @@ function spinDeciderWheel(room) {
   const landed = w.remaining[idx];
   const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
   const target = angleForEntryIndex(w.remaining.length, idx);
-  const extraTurns = 5;
-  const endAngle = target + extraTurns * Math.PI * 2;
-  const durationMs = 1700;
+  const endAngle = target + randomExtraTurns() * Math.PI * 2;
+  const durationMs = randomDuration();
 
   w.remaining.splice(idx, 1);
   w.eliminated.push(landed);
@@ -406,9 +412,8 @@ function spinWheel1(room) {
   const landed = entriesClientIds[idx];
   const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
   const target = angleForEntryIndex(entriesClientIds.length, idx);
-  const extraTurns = 5;
-  const endAngle = target + extraTurns * Math.PI * 2;
-  const durationMs = 1700;
+  const endAngle = target + randomExtraTurns() * Math.PI * 2;
+  const durationMs = randomDuration();
 
   w.remaining.splice(idx, 1);
   w.eliminated.push(landed);
@@ -474,9 +479,8 @@ function spinFinalWheel(room) {
   const landed = w.remaining[idx];
   const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
   const target = angleForEntryIndex(w.remaining.length, idx);
-  const extraTurns = 6;
-  const endAngle = target + extraTurns * Math.PI * 2;
-  const durationMs = 1850;
+  const endAngle = target + randomExtraTurns() * Math.PI * 2;
+  const durationMs = randomDuration();
 
   w.strikes[landed.id] = (w.strikes[landed.id] ?? 0) + 1;
   w.spinNonce += 1;
