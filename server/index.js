@@ -37,6 +37,18 @@ const DEFAULT_POOL = Array.from({ length: 18 }, (_, i) => ({
   label: `Game ${i + 1}`,
 }));
 
+const DEFAULT_DECIDER_POOL = Array.from({ length: 6 }, (_, i) => ({
+  id: `decider-${i + 1}`,
+  label: `Decider Game ${i + 1}`,
+}));
+
+function deciderRangeForSeat(seat) {
+  if (seat === 1) return { start: 0, end: 1 };
+  if (seat === 2) return { start: 2, end: 3 };
+  if (seat === 3) return { start: 4, end: 5 };
+  return null;
+}
+
 /** @type {Map<string, any>} */
 const rooms = new Map();
 
@@ -65,22 +77,24 @@ function makeRoom() {
   return {
     code: nanoid(6).toUpperCase(),
     createdAt: Date.now(),
-    phase: "lobby", // lobby -> draft -> bracket -> wheel1 -> wheel1_done -> wheelFinal -> done
+    phase: "lobby",
+    mode: null, // null until unanimous vote, then "standard" | "decider"
+    modeVotes: {}, // { [clientId]: "standard" | "decider" }
     players: {
       // clientId: { clientId, seat, name, color, ready, connectedSocketIds: Set<string> }
     },
     pool: structuredClone(DEFAULT_POOL),
+    deciderPool: structuredClone(DEFAULT_DECIDER_POOL),
     draft: {
       picksByPlayer: {
         // clientId: [{id,label,ownerClientId}]
       },
       takenIds: new Set(),
-      turnOrder: [], // [clientId, clientId, clientId]
+      turnOrder: [],
       turnIndex: 0,
       totalPicksPerPlayer: 3,
     },
     bracket: {
-      // each player must pick 1 from each owner
       picksByPlayer: {
         // clientId: { [ownerClientId]: {id,label,ownerClientId} }
       },
@@ -88,9 +102,16 @@ function makeRoom() {
     wheel: {
       wheel1: null,
       wheelFinal: null,
+      deciderWheel: null,
+      modeWheel: null,
       result: null,
-      notice: null, // { id, title, bodyHtml, cta }
+      notice: null,
       history: [],
+    },
+    decider: {
+      winningDeciderGame: null,
+      winnerClientId: null,
+      winningBracketGame: null,
     },
   };
 }
@@ -131,12 +152,15 @@ function publicRoomState(room) {
   return {
     code: room.code,
     phase: room.phase,
+    mode: room.mode,
+    modeVotes: { ...room.modeVotes },
     players: playersArr,
     lobby: {
       allReady: allReady(room),
       readyCount: playersArr.filter((p) => p.ready).length,
     },
     pool,
+    deciderPool: room.deciderPool.map((g) => ({ ...g })),
     draft: {
       picksByPlayer: drafted,
       turnOrder: [...room.draft.turnOrder],
@@ -147,9 +171,8 @@ function publicRoomState(room) {
     bracket,
     wheel: {
       ...room.wheel,
-      // Improve notice readability with names/labels resolved client-side,
-      // but also keep raw IDs available in history.
     },
+    decider: { ...room.decider },
   };
 }
 
@@ -206,9 +229,156 @@ function bracketComplete(room) {
   });
 }
 
-function ensureWheel1Started(room) {
+function ensurePostBracket(room) {
   if (room.phase !== "bracket") return;
   if (!bracketComplete(room)) return;
+  if (room.mode === "decider") {
+    ensureDeciderWheelStarted(room);
+    return;
+  }
+  ensureWheel1Started(room);
+}
+
+function startModeWheel(room) {
+  const playerIds = Object.keys(room.players);
+  const entries = playerIds.map((cid) => ({
+    id: cid,
+    vote: room.modeVotes[cid] || "standard",
+  }));
+  room.phase = "modeWheel";
+  room.wheel.modeWheel = {
+    remaining: entries,
+    eliminated: [],
+    winnerVote: null,
+    visualAngle: Math.random() * Math.PI * 2,
+    lastSpin: null,
+    spinNonce: 0,
+  };
+  room.wheel.history.push({ at: Date.now(), event: "modeWheel:start" });
+}
+
+function spinModeWheel(room) {
+  const w = room.wheel.modeWheel;
+  if (!w || room.phase !== "modeWheel") return;
+  if (w.remaining.length <= 1) return;
+  if (room.wheel.notice) return;
+  const entriesItemIds = w.remaining.map((x) => x.id);
+  const idx = Math.floor(Math.random() * w.remaining.length);
+  const landed = w.remaining[idx];
+  const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
+  const target = angleForEntryIndex(w.remaining.length, idx);
+  const extraTurns = 5;
+  const endAngle = target + extraTurns * Math.PI * 2;
+  const durationMs = 1700;
+
+  w.remaining.splice(idx, 1);
+  w.eliminated.push(landed);
+  w.spinNonce += 1;
+  w.lastSpin = {
+    nonce: w.spinNonce,
+    at: Date.now(),
+    entriesItemIds,
+    landedItemId: landed.id,
+    startAngle,
+    endAngle,
+    durationMs,
+  };
+  w.visualAngle = normalizeAngle(endAngle);
+  room.wheel.history.push({ at: Date.now(), event: "modeWheel:land", landed: landed.id, vote: landed.vote });
+
+  const landedPlayer = room.players[landed.id];
+  const landedName = landedPlayer ? landedPlayer.name : landed.id;
+  const voteLabel = landed.vote === "decider" ? "Decider" : "Standard";
+  room.wheel.notice = {
+    id: `modeWheel:${w.spinNonce}`,
+    title: "Vote Eliminated!",
+    bodyHtml: `<div class="modalBig">${landedName}'s vote (${voteLabel})</div>`,
+    cta: "OK",
+  };
+
+  if (w.remaining.length === 1) {
+    w.winnerVote = w.remaining[0].vote;
+    room.mode = w.winnerVote;
+    room.phase = "modeWheelDone";
+    room.wheel.history.push({ at: Date.now(), event: "modeWheel:winner", vote: w.winnerVote });
+    const winnerPlayer = room.players[w.remaining[0].id];
+    const winnerName = winnerPlayer ? winnerPlayer.name : w.remaining[0].id;
+    const winLabel = w.winnerVote === "decider" ? "Decider" : "Standard";
+    room.wheel.notice = {
+      id: `modeWheel:winner:${w.spinNonce}`,
+      title: `${winLabel} Mode Wins!`,
+      bodyHtml: `<div class="modalBig">${winLabel}</div><div>${winnerName}'s vote is the last one standing!</div>`,
+      cta: "Let\u2019s Go",
+    };
+  }
+}
+
+function ensureDeciderWheelStarted(room) {
+  room.phase = "deciderWheel";
+  const items = room.deciderPool.map((g) => ({ ...g }));
+  room.wheel.deciderWheel = {
+    remaining: items,
+    eliminated: [],
+    winnerItem: null,
+    visualAngle: Math.random() * Math.PI * 2,
+    lastSpin: null,
+    spinNonce: 0,
+  };
+  room.wheel.history.push({ at: Date.now(), event: "deciderWheel:start" });
+  roomBroadcast(room);
+}
+
+function spinDeciderWheel(room) {
+  const w = room.wheel.deciderWheel;
+  if (!w || room.phase !== "deciderWheel") return;
+  if (w.remaining.length <= 1) return;
+  if (room.wheel.notice) return;
+  const entriesItemIds = w.remaining.map((x) => x.id);
+  const idx = Math.floor(Math.random() * w.remaining.length);
+  const landed = w.remaining[idx];
+  const startAngle = Number.isFinite(w.visualAngle) ? w.visualAngle : 0;
+  const target = angleForEntryIndex(w.remaining.length, idx);
+  const extraTurns = 5;
+  const endAngle = target + extraTurns * Math.PI * 2;
+  const durationMs = 1700;
+
+  w.remaining.splice(idx, 1);
+  w.eliminated.push(landed);
+  w.spinNonce += 1;
+  w.lastSpin = {
+    nonce: w.spinNonce,
+    at: Date.now(),
+    entriesItemIds,
+    landedItemId: landed.id,
+    startAngle,
+    endAngle,
+    durationMs,
+  };
+  w.visualAngle = normalizeAngle(endAngle);
+  room.wheel.history.push({ at: Date.now(), event: "deciderWheel:land", landed: landed.id });
+
+  room.wheel.notice = {
+    id: `deciderWheel:${w.spinNonce}`,
+    title: "Eliminated!",
+    bodyHtml: `<div class="modalBig">${landed.label}</div>`,
+    cta: "OK",
+  };
+
+  if (w.remaining.length === 1) {
+    w.winnerItem = w.remaining[0];
+    room.decider.winningDeciderGame = { ...w.winnerItem };
+    room.phase = "deciderWheelDone";
+    room.wheel.history.push({ at: Date.now(), event: "deciderWheel:winner", winner: w.winnerItem.id });
+    room.wheel.notice = {
+      id: `deciderWheel:winner:${w.spinNonce}`,
+      title: "Decider Game!",
+      bodyHtml: `<div class="modalBig">${w.winnerItem.label}</div><div>This is the game you'll play to determine the bracket winner.</div>`,
+      cta: "Let's Go",
+    };
+  }
+}
+
+function ensureWheel1Started(room) {
   room.phase = "wheel1";
   const playerIds = Object.keys(room.players)
     .map((cid) => room.players[cid])
@@ -448,6 +618,10 @@ io.on("connection", (socket) => {
     if (!room || room.phase !== "lobby") return;
     const p = room.players[clientId];
     if (!p) return;
+    if (Boolean(ready) && !room.mode) {
+      socket.emit("room:error", { message: "All players must agree on a game mode first." });
+      return;
+    }
     p.ready = Boolean(ready);
     roomBroadcast(room);
     ensureDraftStarted(room);
@@ -590,7 +764,7 @@ io.on("connection", (socket) => {
     myPicks[ownerCid] = { ...game };
     room.bracket.picksByPlayer[clientId] = myPicks;
     roomBroadcast(room);
-    ensureWheel1Started(room);
+    ensurePostBracket(room);
   });
 
   socket.on("bracket:autoPick", ({ code }) => {
@@ -625,7 +799,7 @@ io.on("connection", (socket) => {
 
     room.bracket.picksByPlayer[clientId] = myPicks;
     roomBroadcast(room);
-    ensureWheel1Started(room);
+    ensurePostBracket(room);
   });
 
   socket.on("wheel:spin", ({ code }) => {
@@ -635,8 +809,10 @@ io.on("connection", (socket) => {
     if (!room.players[clientId]) return;
     if (room.wheel.notice) return;
 
-    if (room.phase === "wheel1") spinWheel1(room);
+    if (room.phase === "modeWheel") spinModeWheel(room);
+    else if (room.phase === "wheel1") spinWheel1(room);
     else if (room.phase === "wheelFinal") spinFinalWheel(room);
+    else if (room.phase === "deciderWheel") spinDeciderWheel(room);
 
     roomBroadcast(room);
   });
@@ -646,11 +822,21 @@ io.on("connection", (socket) => {
     const room = safeRoom(roomCode);
     if (!room) return;
     if (!room.players[clientId]) return;
-    if (room.phase !== "wheel1_done") return;
     if (room.wheel.notice) return;
-    room.phase = "wheelFinal";
-    startFinalWheel(room);
-    roomBroadcast(room);
+    if (room.phase === "modeWheelDone") {
+      room.phase = "lobby";
+      for (const cid of Object.keys(room.players)) {
+        room.players[cid].ready = false;
+      }
+      roomBroadcast(room);
+    } else if (room.phase === "wheel1_done") {
+      room.phase = "wheelFinal";
+      startFinalWheel(room);
+      roomBroadcast(room);
+    } else if (room.phase === "deciderWheelDone") {
+      room.phase = "deciderPickWinner";
+      roomBroadcast(room);
+    }
   });
 
   socket.on("wheel:ackNotice", ({ code, id }) => {
@@ -662,6 +848,132 @@ io.on("connection", (socket) => {
     if (!notice) return;
     if (String(id || "") !== notice.id) return;
     room.wheel.notice = null;
+    roomBroadcast(room);
+  });
+
+  socket.on("room:voteMode", ({ code, vote }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "lobby") return;
+    if (room.mode) return;
+    if (!room.players[clientId]) return;
+    const v = vote === "decider" ? "decider" : "standard";
+    room.modeVotes[clientId] = v;
+    const playerIds = Object.keys(room.players);
+    if (playerIds.length === 3) {
+      const votes = playerIds.map((cid) => room.modeVotes[cid]).filter(Boolean);
+      if (votes.length === 3) {
+        if (votes.every((x) => x === votes[0])) {
+          room.mode = votes[0];
+        } else {
+          startModeWheel(room);
+          roomBroadcast(room);
+          return;
+        }
+      }
+    }
+    for (const cid of playerIds) {
+      room.players[cid].ready = false;
+    }
+    roomBroadcast(room);
+  });
+
+  socket.on("room:setDeciderLine", ({ code, index, label }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "lobby") return;
+    const p = room.players[clientId];
+    if (!p) return;
+    const idx = Number(index);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= 6) return;
+    const dr = deciderRangeForSeat(p.seat);
+    if (!dr || idx < dr.start || idx > dr.end) {
+      socket.emit("room:error", { message: "You can only edit your own decider games." });
+      return;
+    }
+    const text = String(label ?? "").trim().slice(0, 40);
+    room.deciderPool[idx] = { id: `decider-${idx + 1}`, label: text || `Decider Game ${idx + 1}` };
+    for (const cid of Object.keys(room.players)) {
+      room.players[cid].ready = false;
+    }
+    roomBroadcast(room);
+  });
+
+  socket.on("room:setDeciderSlice", ({ code, labels }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "lobby") return;
+    const p = room.players[clientId];
+    if (!p) return;
+    const dr = deciderRangeForSeat(p.seat);
+    if (!dr) return;
+    if (!Array.isArray(labels) || labels.length !== 2) {
+      socket.emit("room:error", { message: "Need exactly 2 lines." });
+      return;
+    }
+    for (let i = 0; i < 2; i++) {
+      const idx = dr.start + i;
+      const text = String(labels[i] ?? "").trim().slice(0, 40);
+      room.deciderPool[idx] = { id: `decider-${idx + 1}`, label: text || `Decider Game ${idx + 1}` };
+    }
+    for (const cid of Object.keys(room.players)) {
+      room.players[cid].ready = false;
+    }
+    roomBroadcast(room);
+  });
+
+  socket.on("room:resetDeciderPool", ({ code }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "lobby") return;
+    if (!room.players[clientId]) return;
+    room.deciderPool = structuredClone(DEFAULT_DECIDER_POOL);
+    for (const cid of Object.keys(room.players)) {
+      room.players[cid].ready = false;
+    }
+    roomBroadcast(room);
+  });
+
+  socket.on("decider:pickWinner", ({ code, winnerClientId: wCid }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "deciderPickWinner") return;
+    if (!room.players[clientId]) return;
+    const winnerId = String(wCid || "");
+    if (!room.players[winnerId]) {
+      socket.emit("room:error", { message: "Invalid player." });
+      return;
+    }
+    room.decider.winnerClientId = winnerId;
+    room.phase = "deciderPickGame";
+    room.wheel.history.push({ at: Date.now(), event: "decider:pickWinner", winner: winnerId });
+    roomBroadcast(room);
+  });
+
+  socket.on("decider:pickGame", ({ code, gameId }) => {
+    const roomCode = String(code || "").toUpperCase().trim();
+    const room = safeRoom(roomCode);
+    if (!room || room.phase !== "deciderPickGame") return;
+    if (!room.players[clientId]) return;
+    const winnerId = room.decider.winnerClientId;
+    if (!winnerId) return;
+    const bracketPicks = room.bracket.picksByPlayer[winnerId] ?? {};
+    const allItems = Object.values(bracketPicks).filter(Boolean);
+    const gid = String(gameId || "");
+    const game = allItems.find((g) => g.id === gid);
+    if (!game) {
+      socket.emit("room:error", { message: "Invalid game." });
+      return;
+    }
+    room.decider.winningBracketGame = { ...game };
+    room.wheel.result = {
+      bracketWinnerClientId: winnerId,
+      itemWinnerOwnerClientId: game.ownerClientId ?? null,
+      finalWinnerOwnerClientId: game.ownerClientId ?? null,
+      finalWinningItem: { ...game },
+    };
+    room.phase = "done";
+    room.wheel.history.push({ at: Date.now(), event: "done", result: room.wheel.result });
     roomBroadcast(room);
   });
 
@@ -760,9 +1072,11 @@ io.on("connection", (socket) => {
     const roomCode = String(code || "").toUpperCase().trim();
     const room = safeRoom(roomCode);
     if (!room) return;
-    // Keep players/seats, reset game flow
     room.phase = "lobby";
+    room.mode = null;
+    room.modeVotes = {};
     room.pool = structuredClone(DEFAULT_POOL);
+    room.deciderPool = structuredClone(DEFAULT_DECIDER_POOL);
     room.draft = {
       picksByPlayer: {},
       takenIds: new Set(),
@@ -771,7 +1085,8 @@ io.on("connection", (socket) => {
       totalPicksPerPlayer: 3,
     };
     room.bracket = { picksByPlayer: {} };
-    room.wheel = { wheel1: null, wheelFinal: null, result: null, notice: null, history: [] };
+    room.wheel = { wheel1: null, wheelFinal: null, deciderWheel: null, modeWheel: null, result: null, notice: null, history: [] };
+    room.decider = { winningDeciderGame: null, winnerClientId: null, winningBracketGame: null };
     for (const cid of Object.keys(room.players)) {
       room.players[cid].ready = false;
     }
