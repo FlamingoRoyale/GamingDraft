@@ -22,6 +22,70 @@ let wheelAnim = { lastNonce: 0, spinning: false, angle: 0 };
 let lobbyEdit = { focusedIdx: null, selStart: null, selEnd: null, pendingByIdx: {} };
 let wheelUi = { pendingNoticeId: null, showNotice: false };
 
+function deciderRangeForSeat(seat) {
+  if (seat === 1) return { start: 0, end: 1 };
+  if (seat === 2) return { start: 2, end: 3 };
+  if (seat === 3) return { start: 4, end: 5 };
+  return null;
+}
+
+function buildDeciderPoolHtml(players, deciderPool, canEdit, deciderSeatRange, lobbyEdit, isPlayer) {
+  const cols = [0, 1, 2].map((col) => {
+    const start = col * 2;
+    const ownerSeat = col + 1;
+    const owner = players.find((p) => p.seat === ownerSeat) || null;
+    const rows = Array.from({ length: 2 }, (_, i) => start + i)
+      .map((idx) => {
+        const serverLabel = deciderPool[idx]?.label ?? ("Decider Game " + (idx + 1));
+        const focusKey = "d" + idx;
+        const label =
+          canEdit && lobbyEdit.focusedIdx === focusKey && typeof lobbyEdit.pendingByIdx[focusKey] === "string"
+            ? lobbyEdit.pendingByIdx[focusKey]
+            : serverLabel;
+        const editable = canEdit && deciderSeatRange && idx >= deciderSeatRange.start && idx <= deciderSeatRange.end;
+        return '<div class="item">'
+          + '<div class="label">'
+          + '<div class="mini muted">D' + (idx + 1) + '</div>'
+          + '<input class="input mono" data-decider-idx="' + idx + '"'
+          + ' value="' + escapeHtml(label) + '"'
+          + (!editable ? ' disabled' : '') + '/>'
+          + '</div>'
+          + '<div class="badge">live</div>'
+          + '</div>';
+      })
+      .join("");
+    const dotColor = owner?.color || "rgba(255,255,255,0.3)";
+    const nameStr = owner ? owner.name : ("Player " + ownerSeat);
+    return '<div class="col">'
+      + '<div class="colHeader">'
+      + '<div class="name">'
+      + '<span class="dot" style="background:' + dotColor + '"></span>'
+      + nameStr
+      + '</div>'
+      + '<div class="badge">D' + (start + 1) + '\u2013D' + (start + 2) + '</div>'
+      + '</div>'
+      + '<div class="list">' + rows + '</div>'
+      + '</div>';
+  }).join("");
+
+  const resetDisabled = !canEdit ? " disabled" : "";
+  const pasteDisabled = !canEdit || !deciderSeatRange ? " disabled" : "";
+
+  return '<div class="sep"></div>'
+    + '<div class="sectionTitle"><h3>Decider pool (6)</h3><div class="pill">2 per player</div></div>'
+    + '<div class="mini">Each player adds 2 decider games. The wheel will eliminate them one by one.</div>'
+    + '<div class="sep"></div>'
+    + '<div class="grid3" id="deciderPoolGrid">' + cols + '</div>'
+    + '<div class="wheelRow" style="margin-top:12px">'
+    + '<button class="btn" id="resetDeciderPoolBtn"' + resetDisabled + '>Reset decider pool</button>'
+    + '<button class="btn primary" id="applyDeciderPasteBtn"' + pasteDisabled + '>Apply 2-line paste (your column)</button>'
+    + '<div class="wheelState muted">Paste only updates your 2 decider games.</div>'
+    + '</div>'
+    + '<div style="margin-top:10px">'
+    + '<textarea id="deciderPasteBox" class="input mono" rows="2" spellcheck="false" placeholder="Paste 2 lines for your decider games\u2026 (then click Apply)"></textarea>'
+    + '</div>';
+}
+
 const connectCard = $("#connectCard");
 const statusCard = $("#statusCard");
 const gameCard = $("#gameCard");
@@ -140,12 +204,32 @@ function renderLobby(state) {
   const seatRange =
     meSeat === 1 ? { start: 0, end: 5 } : meSeat === 2 ? { start: 6, end: 11 } : meSeat === 3 ? { start: 12, end: 17 } : null;
 
-  // Preserve focus/selection if user is typing in a pool input.
+  const mode = state.mode;
+  const modeVotes = state.modeVotes || {};
+  const myVote = modeVotes[clientId] || null;
+  const isPlayer = Boolean(meSeat);
+  const showDeciderPool = mode === "decider" || Object.values(modeVotes).some((v) => v === "decider");
+  const deciderPool = state.deciderPool || [];
+
+  const modeStatus = mode
+    ? `${mode.charAt(0).toUpperCase() + mode.slice(1)} (unanimous)`
+    : players.length < 3
+    ? "Waiting for players"
+    : "Vote below";
+
+  const voteDots = players
+    .map((p) => {
+      const v = modeVotes[p.clientId];
+      const vLabel = v === "decider" ? "D" : v === "standard" ? "S" : "?";
+      return `<span class="modeVoteDot" style="border-color:${p.color}" title="${p.name}: ${v || "no vote"}">${vLabel}</span>`;
+    })
+    .join("");
+
   const active = document.activeElement;
   if (active && active.getAttribute) {
-    const idxAttr = active.getAttribute("data-pool-idx");
+    const idxAttr = active.getAttribute("data-pool-idx") ?? active.getAttribute("data-decider-idx");
     if (idxAttr != null) {
-      lobbyEdit.focusedIdx = Number(idxAttr);
+      lobbyEdit.focusedIdx = active.getAttribute("data-pool-idx") != null ? Number(idxAttr) : `d${idxAttr}`;
       lobbyEdit.selStart = active.selectionStart ?? null;
       lobbyEdit.selEnd = active.selectionEnd ?? null;
       lobbyEdit.pendingByIdx[lobbyEdit.focusedIdx] = active.value;
@@ -156,18 +240,41 @@ function renderLobby(state) {
     }
   }
 
+  const deciderSeatRange = meSeat ? deciderRangeForSeat(meSeat) : null;
+
+  const deciderPoolHtml = showDeciderPool ? buildDeciderPoolHtml(players, deciderPool, canEdit, deciderSeatRange, lobbyEdit, isPlayer) : "";
+
+  const readyDisabled = players.length < 3 || !mode;
+
   gameContent.innerHTML = `
     <div class="sectionTitle">
       <h3>Lobby</h3>
       <div class="pill">${players.length}/3 joined · ${readyCount}/3 ready</div>
     </div>
     <div class="mini">
-      Once all 3 are in, everyone clicks <b>Ready</b> to start the draft.
+      Once all 3 are in, choose a game mode, then click <b>Ready</b> to start the draft.
       ${missing > 0 ? `<div style="margin-top:8px">Need <b>${missing}</b> more.</div>` : ""}
     </div>
     <div class="sep"></div>
+    <div class="sectionTitle">
+      <h3>Game Mode</h3>
+      <div class="pill">${modeStatus}</div>
+    </div>
+    <div class="mini">
+      <b>Standard</b> — wheel eliminates players, then 2-hit wheel on the winner's bracket games.<br>
+      <b>Decider</b> — each player adds 2 decider games (6 total). The wheel eliminates them one by one, play the last one standing to pick the bracket winner, then manually pick the champion game.
+    </div>
+    <div class="modeVoteRow">
+      <button class="btn modeBtn ${myVote === "standard" ? "modeActive" : ""}" id="voteStandard" ${!isPlayer || mode ? "disabled" : ""}>Standard</button>
+      <button class="btn modeBtn ${myVote === "decider" ? "modeActive" : ""}" id="voteDecider" ${!isPlayer || mode ? "disabled" : ""}>Decider</button>
+      <div class="modeVoteDots">${voteDots}</div>
+    </div>
+
+    ${mode ? `
+    ${deciderPoolHtml}
+    <div class="sep"></div>
     <div class="wheelRow">
-      <button class="btn ${meReady ? "" : "primary"}" id="readyBtn" ${players.length < 3 ? "disabled" : ""}>
+      <button class="btn ${meReady ? "" : "primary"}" id="readyBtn" ${readyDisabled ? "disabled" : ""}>
         ${meReady ? "Unready" : "Ready"}
       </button>
       <div class="wheelState muted">When the pool is saved, everyone is set to unready.</div>
@@ -178,7 +285,7 @@ function renderLobby(state) {
       <div class="pill">Live-collab</div>
     </div>
     <div class="mini">
-      No overlaps: Player 1 edits 1–6, Player 2 edits 7–12, Player 3 edits 13–18. Changes sync instantly and unready the room.
+      No overlaps: Player 1 edits 1\u20136, Player 2 edits 7\u201312, Player 3 edits 13\u201318. Changes sync instantly and unready the room.
     </div>
     <div class="sep"></div>
     <div class="grid3" id="poolGrid">
@@ -218,7 +325,7 @@ function renderLobby(state) {
                   <span class="dot" style="background:${owner?.color || "rgba(255,255,255,0.3)"}"></span>
                   ${owner ? owner.name : `Player ${ownerSeat}`}
                 </div>
-                <div class="badge">#${start + 1}–${start + 6}</div>
+                <div class="badge">#${start + 1}\u2013${start + 6}</div>
               </div>
               <div class="list">${rows}</div>
             </div>
@@ -232,14 +339,31 @@ function renderLobby(state) {
       <div class="wheelState muted">Paste only updates your 6 items.</div>
     </div>
     <div style="margin-top:10px">
-      <textarea id="pasteBox" class="input mono" rows="5" spellcheck="false" placeholder="Optional: paste 6 lines for your column… (then click Apply)"></textarea>
+      <textarea id="pasteBox" class="input mono" rows="5" spellcheck="false" placeholder="Optional: paste 6 lines for your column\u2026 (then click Apply)"></textarea>
     </div>
+    ` : `
+    <div class="sep"></div>
+    <div class="mini" style="text-align:center; padding:20px 0;">All 3 players must agree on a game mode before the pools appear.</div>
+    `}
   `;
 
-  const resetPoolBtn = $("#resetPoolBtn");
   const readyBtn = $("#readyBtn");
+  const resetPoolBtn = $("#resetPoolBtn");
   const applyPasteBtn = $("#applyPasteBtn");
   const pasteBox = $("#pasteBox");
+  const voteStandard = $("#voteStandard");
+  const voteDecider = $("#voteDecider");
+
+  if (voteStandard) {
+    voteStandard.addEventListener("click", () => {
+      socket.emit("room:voteMode", { code: roomCode, vote: "standard" });
+    });
+  }
+  if (voteDecider) {
+    voteDecider.addEventListener("click", () => {
+      socket.emit("room:voteMode", { code: roomCode, vote: "decider" });
+    });
+  }
 
   if (readyBtn) {
     readyBtn.addEventListener("click", () => {
@@ -256,7 +380,6 @@ function renderLobby(state) {
     });
   }
 
-  // Live per-line updates (debounced per input)
   gameContent.querySelectorAll("[data-pool-idx]").forEach((inp) => {
     let t = null;
     inp.addEventListener("input", () => {
@@ -289,9 +412,53 @@ function renderLobby(state) {
     });
   }
 
+  // Decider pool event handlers
+  gameContent.querySelectorAll("[data-decider-idx]").forEach((inp) => {
+    let t = null;
+    inp.addEventListener("input", () => {
+      const idx = Number(inp.getAttribute("data-decider-idx"));
+      const label = inp.value;
+      lobbyEdit.pendingByIdx[`d${idx}`] = label;
+      clearTimeout(t);
+      t = setTimeout(() => {
+        socket.emit("room:setDeciderLine", { code: roomCode, index: idx, label });
+      }, 120);
+    });
+  });
+
+  const resetDeciderPoolBtn = $("#resetDeciderPoolBtn");
+  if (resetDeciderPoolBtn) {
+    resetDeciderPoolBtn.addEventListener("click", () => {
+      socket.emit("room:resetDeciderPool", { code: roomCode });
+      toast("Decider pool reset");
+    });
+  }
+
+  const applyDeciderPasteBtn = $("#applyDeciderPasteBtn");
+  const deciderPasteBox = $("#deciderPasteBox");
+  if (applyDeciderPasteBtn && deciderPasteBox) {
+    applyDeciderPasteBtn.addEventListener("click", () => {
+      const lines = String(deciderPasteBox.value || "")
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (lines.length !== 2) {
+        toast(`Need exactly 2 lines (got ${lines.length}).`, 2600);
+        return;
+      }
+      socket.emit("room:setDeciderSlice", { code: roomCode, labels: lines });
+      toast("Decider paste applied");
+    });
+  }
+
   // Restore focus/selection after re-render.
-  if (canEdit && Number.isFinite(lobbyEdit.focusedIdx)) {
-    const el = gameContent.querySelector(`[data-pool-idx="${lobbyEdit.focusedIdx}"]`);
+  if (canEdit && lobbyEdit.focusedIdx != null) {
+    let el = null;
+    if (typeof lobbyEdit.focusedIdx === "string" && lobbyEdit.focusedIdx.startsWith("d")) {
+      el = gameContent.querySelector(`[data-decider-idx="${lobbyEdit.focusedIdx.slice(1)}"]`);
+    } else if (Number.isFinite(lobbyEdit.focusedIdx)) {
+      el = gameContent.querySelector(`[data-pool-idx="${lobbyEdit.focusedIdx}"]`);
+    }
     if (el) {
       el.focus({ preventScroll: true });
       if (lobbyEdit.selStart != null && lobbyEdit.selEnd != null) {
@@ -494,6 +661,138 @@ function renderBracket(state) {
   });
 }
 
+function renderModeWheel(state) {
+  const { players, phase, wheel } = state;
+  const mw = wheel.modeWheel;
+  const notice = wheel.notice;
+  const spin = mw?.lastSpin || null;
+  const suppressResult = wheelAnim.spinning || (spin?.nonce && spin.nonce !== wheelAnim.lastNonce);
+
+  const modeColors = { standard: "#4d96ff", decider: "#ff6b6b" };
+
+  function mwEntries() {
+    if (!mw?.remaining?.length) return [];
+    return mw.remaining.map((entry) => {
+      const p = players.find((x) => x.clientId === entry.id);
+      return {
+        id: entry.id,
+        label: (entry.vote === "decider" ? "Decider" : "Standard"),
+        color: modeColors[entry.vote] || "#888",
+        sub: p ? p.name : "",
+      };
+    });
+  }
+
+  const infoHtml = (() => {
+    if (suppressResult) return '<div class="wheelState">Spinning\u2026</div>';
+    if (phase === "modeWheel" && mw) {
+      const rem = mw.remaining.map((e) => {
+        const p = players.find((x) => x.clientId === e.id);
+        return (p ? p.name : "?") + " (" + (e.vote === "decider" ? "D" : "S") + ")";
+      }).join(" \u00b7 ");
+      const elim = mw.eliminated.map((e) => {
+        const p = players.find((x) => x.clientId === e.id);
+        return (p ? p.name : "?") + " (" + (e.vote === "decider" ? "D" : "S") + ")";
+      }).join(" \u00b7 ");
+      return '<div class="wheelState">Remaining: ' + (rem || "\u2014") + '</div>'
+        + '<div class="wheelState">Eliminated: ' + (elim || "\u2014") + '</div>';
+    }
+    if (phase === "modeWheelDone" && mw?.winnerVote) {
+      const winLabel = mw.winnerVote === "decider" ? "Decider" : "Standard";
+      return '<div class="wheelState">Winner: <b>' + winLabel + '</b></div>'
+        + '<div class="wheelState">Click Continue to head back to the lobby.</div>';
+    }
+    return '<div class="wheelState">\u2014</div>';
+  })();
+
+  const spinLabel = phase === "modeWheelDone" ? "Continue" : "Spin the mode wheel!";
+
+  const modalHtml = notice && !suppressResult
+    ? '<div class="modalOverlay" id="wheelModalOverlay">'
+      + '<div class="modal">'
+      + '<div class="modalTitle">' + escapeHtml(notice.title || "") + '</div>'
+      + '<div class="modalBody">' + (notice.bodyHtml || "") + '</div>'
+      + '<div class="modalActions">'
+      + '<button class="btn primary" id="noticeAckBtn">' + escapeHtml(notice.cta || "OK") + '</button>'
+      + '</div></div></div>'
+    : "";
+
+  gameContent.innerHTML =
+    '<div class="sectionTitle"><h3>Mode Tiebreaker!</h3><div class="pill">Wheel decides</div></div>'
+    + '<div class="mini">Not unanimous \u2014 the wheel will eliminate votes one by one. Last vote standing picks the game mode!</div>'
+    + '<div class="sep"></div>'
+    + '<div class="wheelLayout">'
+    + '<div class="wheelCanvasWrap">'
+    + '<div class="wheelPointer"></div>'
+    + '<canvas id="wheelCanvas" width="320" height="320"></canvas>'
+    + '</div>'
+    + '<div>'
+    + '<div class="wheelRow">'
+    + '<button class="btn primary" id="spinBtn" '
+    + (phase === "done" || wheelAnim.spinning || Boolean(notice) || suppressResult ? "disabled" : "") + '>'
+    + spinLabel + '</button>'
+    + '<div class="wheelState muted">Anyone can spin.</div>'
+    + '</div>'
+    + '<div class="sep"></div>'
+    + infoHtml
+    + '</div></div>'
+    + modalHtml;
+
+  const spinBtn = $("#spinBtn");
+  if (spinBtn) {
+    spinBtn.addEventListener("click", () => {
+      if (phase === "modeWheelDone") socket.emit("wheel:continue", { code: roomCode });
+      else socket.emit("wheel:spin", { code: roomCode });
+    });
+  }
+
+  const noticeAckBtn = $("#noticeAckBtn");
+  if (noticeAckBtn && notice) {
+    noticeAckBtn.addEventListener("click", () => {
+      socket.emit("wheel:ackNotice", { code: roomCode, id: notice.id });
+    });
+  }
+  const overlay = $("#wheelModalOverlay");
+  if (overlay && notice) {
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) socket.emit("wheel:ackNotice", { code: roomCode, id: notice.id });
+    });
+  }
+
+  const canvas = $("#wheelCanvas");
+  if (canvas) {
+    const entries = mwEntries();
+    const hasNewSpin = spin && spin.nonce && spin.nonce !== wheelAnim.lastNonce;
+
+    if (hasNewSpin && !wheelAnim.spinning && spin.entriesItemIds?.length) {
+      const allMwEntries = [...(mw?.remaining || []), ...(mw?.eliminated || [])];
+      const byId = new Map(allMwEntries.map((entry) => {
+        const p = players.find((x) => x.clientId === entry.id);
+        return [entry.id, {
+          id: entry.id,
+          label: entry.vote === "decider" ? "Decider" : "Standard",
+          color: modeColors[entry.vote] || "#888",
+          sub: p ? p.name : "",
+        }];
+      }));
+      const snap = spin.entriesItemIds.map((id) => byId.get(id)).filter(Boolean);
+      animateWheelTo(canvas, snap, spin.startAngle ?? 0, spin.endAngle ?? 0, spin.durationMs ?? 1700).then(() => {
+        wheelAnim.angle = (mw?.visualAngle ?? wheelAnim.angle);
+        wheelAnim.lastNonce = spin.nonce;
+        render(state);
+      });
+      return;
+    }
+
+    if (!wheelAnim.spinning) {
+      if (mw && Number.isFinite(mw.visualAngle)) {
+        wheelAnim.angle = mw.visualAngle;
+      }
+      drawWheel(canvas, entries, wheelAnim.angle);
+    }
+  }
+}
+
 function renderWheel(state) {
   const { players, phase, wheel } = state;
 
@@ -504,13 +803,24 @@ function renderWheel(state) {
       ? "Continue"
       : phase === "wheelFinal"
       ? "Spin game wheel (2 hits to eliminate)"
+      : phase === "deciderWheel"
+      ? "Spin decider wheel (last game standing)"
+      : phase === "deciderWheelDone"
+      ? "Continue"
       : "Spin";
 
   const w1 = wheel.wheel1;
   const wf = wheel.wheelFinal;
+  const wd = wheel.deciderWheel;
   const notice = wheel.notice;
   const spin = lastSpin();
   const suppressResult = wheelAnim.spinning || (spin?.nonce && spin.nonce !== wheelAnim.lastNonce);
+
+  function deciderItemOwner(itemId) {
+    const origIdx = parseInt(itemId.replace("decider-", ""), 10) - 1;
+    const ownerSeat = Math.floor(origIdx / 2) + 1;
+    return players.find((p) => p.seat === ownerSeat) || null;
+  }
 
   function wheelEntries() {
     if (phase === "wheel1" && w1) {
@@ -519,7 +829,6 @@ function renderWheel(state) {
         return { id: cid, label: p ? p.name : cid, color: p?.color || "#ffffff", sub: seatLabel(p || { seat: "?" }) };
       });
     }
-    // final game wheel uses the server's remaining items (so eliminated disappears)
     if (wf?.remaining?.length) {
       return wf.remaining.map((it) => {
         const ownerP = playerById(players, it.ownerClientId);
@@ -527,7 +836,18 @@ function renderWheel(state) {
           id: it.id,
           label: it.label,
           color: ownerP?.color || "#ffffff",
-          sub: ownerP ? ownerP.name : "—",
+          sub: ownerP ? ownerP.name : "\u2014",
+        };
+      });
+    }
+    if ((phase === "deciderWheel" || phase === "deciderWheelDone") && wd?.remaining?.length) {
+      return wd.remaining.map((it) => {
+        const owner = deciderItemOwner(it.id);
+        return {
+          id: it.id,
+          label: it.label,
+          color: owner?.color || "#888",
+          sub: owner ? owner.name : "",
         };
       });
     }
@@ -537,6 +857,7 @@ function renderWheel(state) {
   function lastSpin() {
     if (phase === "wheel1" || phase === "wheel1_done") return w1?.lastSpin || null;
     if (phase === "wheelFinal" || phase === "done") return wf?.lastSpin || null;
+    if (phase === "deciderWheel" || phase === "deciderWheelDone") return wd?.lastSpin || null;
     return null;
   }
 
@@ -557,15 +878,27 @@ function renderWheel(state) {
     if (phase === "wheelFinal" && wf) {
       const strikeText = Object.entries(wf.strikes || {})
         .map(([gid, n]) => `${gid}=${n}`)
-        .join(" · ");
+        .join(" \u00b7 ");
       return `
         <div class="wheelState">Bracket winner: <b>${displayName(players, wf.bracketOwnerClientId)}</b></div>
-        <div class="wheelState">Remaining games: ${wf.remaining.map((it) => it.label).join(" · ") || "—"}</div>
-        <div class="wheelState">Strikes: ${strikeText || "—"}</div>
-        <div class="wheelState">Eliminated: ${wf.eliminated.map((it) => it.label).join(" · ") || "—"}</div>
+        <div class="wheelState">Remaining games: ${wf.remaining.map((it) => it.label).join(" \u00b7 ") || "\u2014"}</div>
+        <div class="wheelState">Strikes: ${strikeText || "\u2014"}</div>
+        <div class="wheelState">Eliminated: ${wf.eliminated.map((it) => it.label).join(" \u00b7 ") || "\u2014"}</div>
       `;
     }
-    return `<div class="wheelState">—</div>`;
+    if (phase === "deciderWheel" && wd) {
+      return `
+        <div class="wheelState">Remaining: ${wd.remaining.map((it) => it.label).join(" \u00b7 ") || "\u2014"}</div>
+        <div class="wheelState">Eliminated: ${wd.eliminated.map((it) => it.label).join(" \u00b7 ") || "\u2014"}</div>
+      `;
+    }
+    if (phase === "deciderWheelDone" && wd?.winnerItem) {
+      return `
+        <div class="wheelState">Decider game: <b>${wd.winnerItem.label}</b></div>
+        <div class="wheelState">Click Continue to pick the bracket winner.</div>
+      `;
+    }
+    return `<div class="wheelState">\u2014</div>`;
   })();
 
   const result = wheel.result;
@@ -608,10 +941,11 @@ function renderWheel(state) {
       <h3>Wheel Time</h3>
       <div class="pill">${phase.toUpperCase()}</div>
     </div>
-    <div class="mini">
-      Wheel 1 eliminates players until 1 remains (that player’s bracket wins).
-      Final wheel spins the <b>3 games</b> in that bracket: you must land on a game <b>twice</b> before it’s eliminated.
-    </div>
+    <div class="mini">${
+      phase === "deciderWheel" || phase === "deciderWheelDone"
+        ? "Decider wheel eliminates games one by one. The <b>last game standing</b> is the decider game you'll play."
+        : "Wheel 1 eliminates players until 1 remains (that player’s bracket wins). Final wheel spins the <b>3 games</b> in that bracket: you must land on a game <b>twice</b> before it’s eliminated."
+    }</div>
     <div class="sep"></div>
     <div class="wheelBox">
       <div class="wheelWrap">
@@ -641,7 +975,7 @@ function renderWheel(state) {
   const spinBtn = $("#spinBtn");
   if (spinBtn) {
     spinBtn.addEventListener("click", () => {
-      if (phase === "wheel1_done") socket.emit("wheel:continue", { code: roomCode });
+      if (phase === "wheel1_done" || phase === "deciderWheelDone") socket.emit("wheel:continue", { code: roomCode });
       else socket.emit("wheel:spin", { code: roomCode });
     });
   }
@@ -669,11 +1003,25 @@ function renderWheel(state) {
         const allWfItems = [...(wf?.remaining || []), ...(wf?.eliminated || [])];
         const byId = new Map(allWfItems.map((it) => {
           const ownerP = playerById(players, it.ownerClientId);
-          return [it.id, { id: it.id, label: it.label, color: ownerP?.color || "#ffffff", sub: ownerP ? ownerP.name : "—" }];
+          return [it.id, { id: it.id, label: it.label, color: ownerP?.color || "#ffffff", sub: ownerP ? ownerP.name : "\u2014" }];
         }));
         const snap = spin.entriesItemIds.map((id) => byId.get(id)).filter(Boolean);
         animateWheelTo(canvas, snap, spin.startAngle ?? 0, spin.endAngle ?? 0, spin.durationMs ?? 1700).then(() => {
           wheelAnim.angle = (wf?.visualAngle ?? wheelAnim.angle);
+          wheelAnim.lastNonce = spin.nonce;
+          render(state);
+        });
+        return;
+      }
+      if ((phase === "deciderWheel" || phase === "deciderWheelDone") && spin.entriesItemIds?.length) {
+        const allDwItems = [...(wd?.remaining || []), ...(wd?.eliminated || [])];
+        const byId = new Map(allDwItems.map((it) => {
+          const owner = deciderItemOwner(it.id);
+          return [it.id, { id: it.id, label: it.label, color: owner?.color || "#888", sub: owner ? owner.name : "" }];
+        }));
+        const snap = spin.entriesItemIds.map((id) => byId.get(id)).filter(Boolean);
+        animateWheelTo(canvas, snap, spin.startAngle ?? 0, spin.endAngle ?? 0, spin.durationMs ?? 1700).then(() => {
+          wheelAnim.angle = (wd?.visualAngle ?? wheelAnim.angle);
           wheelAnim.lastNonce = spin.nonce;
           render(state);
         });
@@ -688,6 +1036,9 @@ function renderWheel(state) {
       }
       if ((phase === "wheelFinal" || phase === "done") && wf && Number.isFinite(wf.visualAngle)) {
         wheelAnim.angle = wf.visualAngle;
+      }
+      if ((phase === "deciderWheel" || phase === "deciderWheelDone") && wd && Number.isFinite(wd.visualAngle)) {
+        wheelAnim.angle = wd.visualAngle;
       }
     }
 
@@ -814,6 +1165,127 @@ function animateWheelTo(canvas, entries, startAngle, endAngle, durationMs) {
   });
 }
 
+function renderDeciderPickWinner(state) {
+  const { players, decider, bracket, draft } = state;
+  const deciderGame = decider.winningDeciderGame;
+
+  const playerCards = players
+    .map((p) => {
+      const bracketPicks = bracket[p.clientId] || {};
+      const items = Object.values(bracketPicks)
+        .filter(Boolean)
+        .map((g) => {
+          const ownerP = playerById(players, g.ownerClientId);
+          return `<div class="item"><div class="label">${escapeHtml(g.label)}</div><div class="badge">${ownerP ? ownerP.name : "\u2014"}</div></div>`;
+        })
+        .join("");
+      return `
+        <div class="col pickCard">
+          <div class="colHeader">
+            <div class="name"><span class="dot" style="background:${p.color}"></span>${escapeHtml(p.name)}</div>
+            <div class="badge">${seatLabel(p)}</div>
+          </div>
+          <div class="list">${items || '<div class="mini muted">No bracket items.</div>'}</div>
+          <div style="margin-top:12px">
+            <button class="btn primary pickWinnerBtn" data-winner-cid="${p.clientId}">Select Winner</button>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+
+  gameContent.innerHTML = `
+    <div class="sectionTitle">
+      <h3>Who won the decider?</h3>
+      <div class="pill">${escapeHtml(deciderGame?.label || "\u2014")}</div>
+    </div>
+    <div class="mini">
+      Play <b>${escapeHtml(deciderGame?.label || "the decider game")}</b> and select the winning player below. Their bracket will advance to the final pick.
+    </div>
+    <div class="sep"></div>
+    <div class="grid3">${playerCards}</div>
+  `;
+
+  gameContent.querySelectorAll(".pickWinnerBtn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const cid = btn.getAttribute("data-winner-cid");
+      socket.emit("decider:pickWinner", { code: roomCode, winnerClientId: cid });
+    });
+  });
+}
+
+function renderDeciderPickGame(state) {
+  const { players, decider, bracket, draft } = state;
+  const winnerId = decider.winnerClientId;
+  const winner = playerById(players, winnerId);
+  const deciderGame = decider.winningDeciderGame;
+  const bracketPicks = bracket[winnerId] || {};
+  const allItems = Object.values(bracketPicks).filter(Boolean);
+
+  const gameCards = allItems
+    .map((g) => {
+      const ownerP = playerById(players, g.ownerClientId);
+      return `
+        <div class="col pickCard">
+          <div class="colHeader">
+            <div class="name">${escapeHtml(g.label)}</div>
+          </div>
+          <div class="mini" style="margin-bottom:10px">
+            From <b><span class="dot" style="background:${ownerP?.color || "#fff"}; display:inline-block; width:8px; height:8px; vertical-align:middle; margin-right:4px"></span>${escapeHtml(ownerP?.name || "\u2014")}</b>'s pool
+          </div>
+          <button class="btn primary pickGameBtn" data-game-id="${g.id}">Select Champion</button>
+        </div>
+      `;
+    })
+    .join("");
+
+  gameContent.innerHTML = `
+    <div class="sectionTitle">
+      <h3>Pick the champion game</h3>
+      <div class="pill">Winner: ${escapeHtml(winner?.name || "\u2014")}</div>
+    </div>
+    <div class="mini">
+      <b>${escapeHtml(winner?.name || "The winner")}</b> won <b>${escapeHtml(deciderGame?.label || "the decider")}</b>.
+      Now select which game from their bracket is the overall champion.
+    </div>
+    <div class="sep"></div>
+    <div class="grid3">${gameCards}</div>
+  `;
+
+  gameContent.querySelectorAll(".pickGameBtn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const gid = btn.getAttribute("data-game-id");
+      socket.emit("decider:pickGame", { code: roomCode, gameId: gid });
+    });
+  });
+}
+
+function renderDeciderDone(state) {
+  const { players, decider, wheel } = state;
+  const result = wheel.result;
+  if (!result) return;
+  const winner = playerById(players, result.bracketWinnerClientId);
+  const gameOwner = playerById(players, result.finalWinnerOwnerClientId);
+  const deciderGame = decider.winningDeciderGame;
+
+  gameContent.innerHTML = `
+    <div class="sectionTitle">
+      <h3>Game Over</h3>
+      <div class="pill">Complete</div>
+    </div>
+    <div class="sep"></div>
+    <div class="winCard">
+      <div class="winTitle">Champion!</div>
+      <div class="winRow">
+        <div class="wheelState">Decider game: <b>${escapeHtml(deciderGame?.label || "\u2014")}</b></div>
+        <div class="wheelState">Bracket winner: <b>${escapeHtml(winner?.name || "\u2014")}</b></div>
+        <div class="wheelState">Winning game: <b>${escapeHtml(result.finalWinningItem?.label || "\u2014")}</b></div>
+        <div class="wheelState">Game from: <b>${escapeHtml(gameOwner?.name || "\u2014")}</b>'s pool</div>
+      </div>
+    </div>
+  `;
+}
+
 function render(state) {
   roomState = state;
   phaseNameEl.textContent = state.phase;
@@ -825,12 +1297,18 @@ function render(state) {
   whoamiEl.textContent = myPlayer ? `${myPlayer.name} (${seatLabel(myPlayer)})` : "Spectator";
 
   if (state.phase === "lobby") return renderLobby(state);
+  if (state.phase === "modeWheel" || state.phase === "modeWheelDone") return renderModeWheel(state);
   if (state.phase === "draft") return renderDraft(state);
   if (state.phase === "bracket") return renderBracket(state);
+  if (state.phase === "deciderPickWinner") return renderDeciderPickWinner(state);
+  if (state.phase === "deciderPickGame") return renderDeciderPickGame(state);
+  if (state.phase === "done" && state.mode === "decider") return renderDeciderDone(state);
   if (
     state.phase === "wheel1" ||
     state.phase === "wheel1_done" ||
     state.phase === "wheelFinal" ||
+    state.phase === "deciderWheel" ||
+    state.phase === "deciderWheelDone" ||
     state.phase === "done"
   ) {
     return renderWheel(state);
